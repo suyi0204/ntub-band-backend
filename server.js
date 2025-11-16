@@ -1,5 +1,4 @@
 const express = require('express');
-const nodemailer = require('nodemailer');
 const cors = require('cors');
 
 const app = express();
@@ -19,7 +18,7 @@ app.use(express.json());
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.header('Access-Control-Allow-Headers', 'Content-Type', 'Authorization, X-Requested-With');
   
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
@@ -27,35 +26,41 @@ app.use((req, res, next) => {
   next();
 });
 
-// Gmail SMTP 配置
-const createTransporter = () => {
-  if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
-    console.error('❌ 缺少環境變數: GMAIL_USER 或 GMAIL_APP_PASSWORD');
-    return null;
-  }
-  
-  const cleanPassword = process.env.GMAIL_APP_PASSWORD.replace(/\s/g, '');
-  
-  console.log('🔧 創建 SMTP 傳輸器...');
-  console.log('📧 用戶:', process.env.GMAIL_USER);
-  console.log('🔑 密碼長度:', cleanPassword.length);
-  
-  return nodemailer.createTransport({
-    host: 'smtp.gmail.com',
-    port: 587,
-    secure: false,
-    auth: {
-      user: process.env.GMAIL_USER,
-      pass: cleanPassword
-    },
-    connectionTimeout: 30000,
-    greetingTimeout: 30000,
-    socketTimeout: 60000,
-    tls: {
-      rejectUnauthorized: false
+// Resend 郵件發送函數
+async function sendEmail(sendTo, subject, htmlContent) {
+  try {
+    console.log('🔄 開始發送 Resend 郵件...');
+    console.log('📧 收件人:', sendTo);
+    console.log('📝 主題:', subject);
+
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        from: '北商熱音社 <onboarding@resend.dev>',
+        to: [sendTo],
+        subject: subject,
+        html: htmlContent
+      })
+    });
+
+    const result = await response.json();
+
+    if (response.ok) {
+      console.log('✅ Resend 郵件發送成功, ID:', result.id);
+      return { success: true, messageId: result.id };
+    } else {
+      console.error('❌ Resend API 錯誤:', result);
+      throw new Error(`Resend 錯誤: ${result.message || '未知錯誤'}`);
     }
-  });
-};
+  } catch (error) {
+    console.error('❌ 郵件發送失敗:', error.message);
+    throw error;
+  }
+}
 
 // 郵件模板函數
 function generateEmailContent(type, notification_type, data) {
@@ -153,41 +158,6 @@ function generateEmailContent(type, notification_type, data) {
   return { subject, html };
 }
 
-// 測試郵件連接
-const testEmailConnection = async () => {
-  console.log('\n🔧 開始測試郵件伺服器連接...');
-  
-  try {
-    const transporter = createTransporter();
-    if (!transporter) {
-      throw new Error('SMTP 傳輸器創建失敗');
-    }
-
-    await transporter.verify();
-    console.log('✅ 郵件伺服器連接成功');
-
-    const testMail = {
-      from: process.env.GMAIL_USER,
-      to: process.env.GMAIL_USER,
-      subject: '📧 北商熱音社郵件服務測試 - Railway',
-      html: `
-        <div style="font-family: Arial, sans-serif; padding: 20px;">
-          <h2 style="color: #3b82f6;">北商熱音社郵件服務測試</h2>
-          <p>這是一封測試郵件，表示您的郵件服務已在 Railway 正常運作！</p>
-          <p><strong>時間：</strong>${new Date().toLocaleString('zh-TW')}</p>
-        </div>
-      `
-    };
-
-    const info = await transporter.sendMail(testMail);
-    console.log('✅ 測試郵件發送成功:', info.messageId);
-    
-  } catch (error) {
-    console.error('❌ 郵件伺服器連接失敗:', error.message);
-    setTimeout(testEmailConnection, 30000);
-  }
-};
-
 // 郵件發送 API
 app.post('/api/send-email', async (req, res) => {
   try {
@@ -195,23 +165,23 @@ app.post('/api/send-email', async (req, res) => {
 
     console.log('📧 收到郵件發送請求:', { to, type, notification_type });
 
-    const emailContent = generateEmailContent(type, notification_type, data);
-    const transporter = createTransporter();
-    
-    if (!transporter) {
-      throw new Error('郵件服務未就緒');
+    // 檢查環境變數
+    if (!process.env.RESEND_API_KEY) {
+      throw new Error('RESEND_API_KEY 環境變數未設定');
     }
 
-    const mailOptions = {
-      from: process.env.GMAIL_USER,
-      to: to,
-      subject: emailContent.subject,
-      html: emailContent.html
-    };
+    console.log('🔑 Resend API Key 已設定');
 
-    const result = await transporter.sendMail(mailOptions);
+    // 生成郵件內容
+    const emailContent = generateEmailContent(type, notification_type, data);
     
-    console.log('✅ 郵件發送成功');
+    console.log('📝 郵件內容生成完成');
+
+    // 發送郵件
+    const result = await sendEmail(to, emailContent.subject, emailContent.html);
+    
+    console.log('✅ 郵件發送流程完成');
+    
     res.json({ 
       success: true, 
       message: '郵件發送成功',
@@ -230,20 +200,95 @@ app.post('/api/send-email', async (req, res) => {
 
 // 健康檢查端點
 app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
+  const healthInfo = {
+    status: 'OK',
     service: '北商熱音社郵件服務',
     timestamp: new Date().toISOString(),
-    environment: 'Railway'
-  });
+    environment: 'Railway',
+    emailService: 'Resend',
+    resendConfigured: !!process.env.RESEND_API_KEY
+  };
+
+  console.log('❤️ 健康檢查請求', healthInfo);
+  
+  res.json(healthInfo);
+});
+
+// 測試郵件端點
+app.post('/api/test-email', async (req, res) => {
+  try {
+    const { to = '11056046@ntub.edu.tw' } = req.body;
+
+    console.log('🧪 測試郵件請求，收件人:', to);
+
+    if (!process.env.RESEND_API_KEY) {
+      throw new Error('RESEND_API_KEY 未設定');
+    }
+
+    const testEmail = {
+      from: '北商熱音社 <onboarding@resend.dev>',
+      to: [to],
+      subject: '🧪 北商熱音社郵件服務測試 - Resend',
+      html: `
+        <div style="font-family: Arial, sans-serif; padding: 20px;">
+          <h2 style="color: #3b82f6;">北商熱音社郵件服務測試</h2>
+          <p>這是一封測試郵件，表示您的 Resend 郵件服務已正常運作！</p>
+          <p><strong>時間：</strong>${new Date().toLocaleString('zh-TW')}</p>
+          <p><strong>服務：</strong>Resend</p>
+          <p><strong>狀態：</strong>✅ 運作正常</p>
+        </div>
+      `
+    };
+
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(testEmail)
+    });
+
+    const result = await response.json();
+
+    if (response.ok) {
+      console.log('✅ 測試郵件發送成功:', result.id);
+      res.json({ 
+        success: true, 
+        message: '測試郵件發送成功',
+        messageId: result.id 
+      });
+    } else {
+      throw new Error(`Resend 錯誤: ${result.message}`);
+    }
+
+  } catch (error) {
+    console.error('❌ 測試郵件發送失敗:', error.message);
+    res.status(500).json({ 
+      success: false, 
+      error: '測試郵件發送失敗',
+      details: error.message 
+    });
+  }
 });
 
 // 啟動伺服器
 app.listen(PORT, () => {
-  console.log(`✅ 伺服器啟動成功，端口：${PORT}`);
+  console.log('='.repeat(50));
+  console.log('🚀 北商熱音社郵件服務啟動成功');
+  console.log('='.repeat(50));
+  console.log(`✅ 伺服器端口：${PORT}`);
   console.log(`📧 郵件 API 端點：http://localhost:${PORT}/api/send-email`);
+  console.log(`🧪 測試郵件端點：http://localhost:${PORT}/api/test-email`);
   console.log(`❤️  健康檢查：http://localhost:${PORT}/api/health`);
-  console.log(`📨 發件人：${process.env.GMAIL_USER}`);
+  console.log(`📨 郵件服務：Resend`);
+  console.log(`🔑 API Key 設定：${process.env.RESEND_API_KEY ? '✅ 已設定' : '❌ 未設定'}`);
+  console.log('='.repeat(50));
   
-  setTimeout(testEmailConnection, 5000);
+  // 顯示環境資訊
+  if (process.env.RESEND_API_KEY) {
+    console.log('🎉 系統就緒！可以開始測試郵件發送');
+  } else {
+    console.log('⚠️  請設定 RESEND_API_KEY 環境變數');
+  }
 });
